@@ -3,7 +3,9 @@ package main
 import (
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 
 	peerjs "github.com/muka/peerjs-go/server"
 )
@@ -37,4 +39,11 @@ func main() {
 	if err := server.Start(); err != nil {
 		log.Fatalf("Error crítico en el servidor: %v", err)
 	}
+
+	// Mantener el proceso vivo ya que server.Start() de muka-go es asíncrono
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Servidor detenido.")
 }

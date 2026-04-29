@@ -3,8 +3,8 @@ services:
     name: mi-peerjs-server
     env: go
     plan: free
-    buildCommand: go build -o bin/server main.go
-    startCommand: ./bin/server
+    buildCommand: go build -o server main.go
+    startCommand: ./server
     envVars:
       - key: GO_VERSION
         value: 1.24.4
