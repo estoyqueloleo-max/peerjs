@@ -247,5 +247,94 @@ O directamente con flags:
 | 🟡 **Activo** | 🟡 **CGNAT Detectado** | El router abre el puerto, pero el operador bloquea las conexiones entrantes en su nodo central. | Pedir al operador salir de CGNAT (Digi: +1€ Conexión Plus, MásMóvil/Pepephone: solicitar IP pública), o usar **Cloudflare Tunnel / Tailscale Funnel**. |
 | 🔴 **No detectado** | ⚪ Desconocido | UPnP desactivado en el router o cortafuegos bloqueando paquetes SSDP. | Acceder a `192.168.1.1` y activar UPnP en la pestaña WAN/NAT, o realizar Port Forwarding manual de `3478 UDP` y `9000 TCP`. |
 
+---
+
+## 12. Análisis de Escenarios Críticos: CGNAT Estricto, Tráfico de Medios y Próximos Pasos de Red
+
+### 12.1 Caso Real: Diagnóstico del Fallo de Conexión en Móvil 5G
+Cuando una app cliente (ej. Pingo en un móvil con datos 5G) intenta conectar contra un nodo doméstico en una Raspberry Pi Zero con DuckDNS y arroja el error:
+`❌ Fallo de conexión: No se pudo alcanzar https://pingo-casa.duckdns.org:9000/. Verifica host, puerto y certificados SSL.`
+
+El fallo responde a una combinación de tres factores técnicos concurrentes:
+1. **Conflicto de Protocolo y Certificado SSL (HTTPS vs HTTP):**
+   * El binario `p2pt-server` escucha en texto plano HTTP en el puerto 9000 por defecto.
+   * La app cliente en HTTPS (PWA o web) exige TLS/SSL (`https://` y `wss://`) para evitar el bloqueo de contenido mixto (*Mixed Content*). Al negociar TLS contra un socket HTTP plano, el *handshake* se cancela de inmediato.
+2. **Puertos Cerrados / UPnP Inactivo:**
+   * El router doméstico no tiene UPnP activado (o bloquea SSDP), por lo que las peticiones entrantes desde Internet al puerto 9000 TCP y 3478 UDP son descartadas en el firewall del router.
+3. **CGNAT del Operador (ej. Digi, MásMóvil, Pepephone):**
+   * El router no posee una dirección IPv4 pública exclusiva, sino una IP compartida del operador (`100.64.0.0/10`).
+   * DuckDNS registra la IP pública del nodo CGNAT del operador, pero las conexiones entrantes jamás son enrutadas hacia el router doméstico.
+
+---
+
+### 12.2 El "Trilema de las Redes P2P"
+Cualquier arquitectura de comunicación descentralizada se enfrenta al siguiente compromiso fundamental:
+
+```
+                  [ 1. Cero Configuración ]
+                    (Sin tocar router/CGNAT)
+                             /\
+                            /  \
+                           /    \
+                          /  ★   \
+                         /________\
+[ 2. Cero Coste de Servidor ]      [ 3. 100% Fiabilidad ]
+   (P2P puro, sin pagar ancho        (Conecta siempre: 5G a 5G,
+    de banda en la nube)              NAT simétrico, firewalls)
+```
+
+Solo es posible optimizar simultáneamente **dos de los tres vértices**:
+* **Facilidad + 100% Fiabilidad (Modelo Zoom/WhatsApp):** Conecta en cualquier red sin configuración, pero cuando el P2P directo falla, un servidor TURN/Relé centralizado asume el coste y consumo del ancho de banda de vídeo.
+* **Cero Coste + 100% Fiabilidad (Modelo Servidor Clásico):** Tráfico directo y sin intermediarios, pero requiere que el usuario abra puertos en el router, active UPnP o contrate IP pública dedicada.
+* **Facilidad + Cero Coste (Modelo STUN Puro):** Cero configuración y sin costes de infraestructura, pero fallará en el ~10-15% de escenarios difíciles (conexiones móviles 5G/4G con NAT simétrico).
+
+---
+
+### 12.3 Desacoplamiento de Tráfico: Señalización vs Tráfico de Medios (Vídeo/Audio)
+Para optimizar el rendimiento y coste de red, es crítico distinguir el comportamiento de ambos flujos:
+
+| Tipo de Tráfico | Protocolo / Rol | Consumo de Red | Requisito de Infraestructura |
+| :--- | :--- | :--- | :--- |
+| **Señalización** | PeerJS (HTTP/WebSocket) | **Insignificante** (~pocos KBs por llamada en JSON). | Puede canalizarse por túneles inversos gratuitos (Cloudflare Tunnel, ngrok, frp) sin saturación ni coste. |
+| **Medios Directos (P2P)** | WebRTC Media (STUN) | **Alto** (1 a 4 Mbps por stream HD), pero **va directo entre clientes**. | No gasta ancho de banda del servidor ni de la Raspberry Pi Zero. |
+| **Relé de Medios (TURN)** | Pion TURN / Coturn | **Alto y Crítico** (retransmite el 100% del audio/vídeo). | Requiere puerto UDP accesible o servidor con alto ancho de banda si el P2P falla. |
+
+---
+
+### 12.4 Análisis Técnico Detallado de Alternativas
+
+#### 1. Servidores STUN Públicos (Google `stun.l.google.com:19302`)
+* **Capacidad:** Solo realizan descubrimiento de IP y puerto reflexivo (*NAT discovery* para *UDP Hole Punching*).
+* **Limitación en 5G a 5G:** En redes móviles 5G y bajo CGNAT, los operadores emplean **NAT Simétrico** (asignan un puerto distinto para cada IP/puerto destino). En este caso, el *hole punching* de STUN **falla matemáticamente**. Google **no** ofrece servicio de relé TURN gratuito; por tanto, sin un TURN accesible, la llamada no puede establecerse.
+
+#### 2. Despliegue con IPv6 Nativa (El estándar del futuro)
+* **Ventaja:** Operadores como Digi proporcionan prefijos IPv6 globales (`/56` o `/64`). En IPv6 **no existe NAT ni CGNAT**: la Raspberry Pi Zero tiene su propia IP globalmente enrutable, y DuckDNS soporta registros `AAAA`.
+* **Requisito de Firewall:** Aunque no existe el "Port Forwarding" tradicional, los routers domésticos incorporan un cortafuegos con inspección de estado (**Stateful Firewall / RFC 6092**) que bloquea conexiones entrantes no solicitadas. Se requiere habilitar una regla de apertura (*pinhole*) en el firewall IPv6 del router para los puertos 9000 TCP y 3478 UDP.
+
+#### 3. Redes Mesh VPN / Servidor Central con WireGuard
+* **Topología Hub-and-Spoke (Servidor Central):** Si las Raspberry Pi y los clientes se conectan a un WireGuard central con IP pública, todo el tráfico de relé pasa por el servidor central. Esto duplica el consumo de ancho de banda del VPS (tráfico de entrada + tráfico de salida por cada llamada activa).
+* **Topología Mesh con NAT Traversal (Tailscale / ZeroTier):** Ambos extremos negocian una conexión directa P2P mediante servidores de coordinación (DERP). Si el *hole punching* funciona, el tráfico va directo sin consumir ancho de banda central. **Inconveniente:** Requiere instalar clientes VPN adicionales en los dispositivos móviles de los usuarios finales.
+
+#### 4. Salida de CGNAT en Operador (Digi "Conexión Plus")
+* Por 1 €/mes, Digi asigna una dirección IPv4 pública dinámica real, eliminando el CGNAT y permitiendo que UPnP y el Port Forwarding funcionen con total normalidad.
+
+---
+
+### 12.5 Hoja de Ruta y Próximos Pasos Técnicos para el Appliance Pingo
+
+1. **Integración de Túnel Inverso Ligero para Señalización y SSL:**
+   * Incorporar en `p2pt-server` un cliente integrado para túneles salientes (ej. **Cloudflare Tunnel (`cloudflared`)** o **BoringProxy**).
+   * **Beneficio:** Otorga un subdominio público con certificado HTTPS/WSS válido de forma inmediata, saltándose CGNAT y routers cerrados sin requerir configuración manual ni abrir puertos para la señalización.
+2. **Soporte Nativo de IPv6 (Registros AAAA en DuckDNS):**
+   * Ampliar el cliente DuckDNS interno de `p2pt-server` para registrar tanto la IPv4 como la dirección global IPv6 (`AAAA`).
+   * Añadir en el panel web un test de conectividad IPv6 y verificación de firewall *pinhole*.
+3. **Detección Avanzada del Tipo de NAT en el Asistente:**
+   * Implementar en el motor de diagnóstico de Go una prueba RFC 3489/5389 para clasificar el tipo de NAT de la conexión (*Full Cone, Restricted Cone, Port Restricted, Symmetric*).
+   * Informar al usuario en el Dashboard si su red permite llamadas P2P directas o si requerirá un relé TURN externo.
+4. **Arquitectura Híbrida de TURN Comunitario / Federado:**
+   * Configurar los clientes Pingo para priorizar siempre la conexión P2P directa (vía STUN).
+   * Disponer de una lista de servidores TURN de respaldo comunitarios con limitación de tasa (*rate-limiting*) para atender únicamente el ~15% de llamadas bajo NAT simétrico estricto.
+
+
 
 
